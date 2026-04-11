@@ -1,0 +1,790 @@
+#!/usr/bin/env python3
+
+import urllib.request
+import json
+import sys
+import socket
+import os
+import re
+import time
+import subprocess
+import getpass
+import hashlib
+import ipaddress
+from datetime import datetime
+
+VERSION = "1.BETA"
+
+def clear_screen():
+    os.system('clear' if os.name == 'posix' else 'cls')
+
+def color_text(text, color_code):
+    colors = {
+        'red': '\033[91m',
+        'green': '\033[92m',
+        'yellow': '\033[93m',
+        'blue': '\033[94m',
+        'purple': '\033[95m',
+        'cyan': '\033[96m',
+        'white': '\033[97m',
+        'bold': '\033[1m',
+        'reset': '\033[0m'
+    }
+    return f"{colors.get(color_code, '')}{text}{colors['reset']}"
+
+def banner():
+    clear_screen()
+    banner_text = r"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                                                                      ║
+    ║     ██╗   ██╗███╗   ██╗██╗██████╗                                   ║
+    ║     ██║   ██║████╗  ██║██║██╔══██╗                                  ║
+    ║     ██║   ██║██╔██╗ ██║██║██████╔╝                                  ║
+    ║     ██║   ██║██║╚██╗██║██║██╔═══╝                                   ║
+    ║     ╚██████╔╝██║ ╚████║██║██║                                      ║
+    ║      ╚═════╝ ╚═╝  ╚═══╝╚═╝╚═╝                                      ║
+    ║                                                                      ║
+    ║                           UNIP v1.BETA                               ║
+    ║                                                                      ║
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+    print(color_text(banner_text, 'cyan'))
+    print()
+
+def get_public_ip():
+    try:
+        req = urllib.request.Request('https://api.ipify.org?format=json', headers={'User-Agent': 'UNIP/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            return data['ip']
+    except:
+        return None
+
+def validate_ip(ip):
+    pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    if re.match(pattern, ip):
+        parts = ip.split('.')
+        for part in parts:
+            if int(part) > 255:
+                return False
+        return True
+    return False
+
+def get_ip_location(ip):
+    try:
+        url = f'http://ip-api.com/json/{ip}?fields=66846719'
+        req = urllib.request.Request(url, headers={'User-Agent': 'UNIP/1.0'})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode())
+            
+            if data.get('status') == 'success':
+                return {
+                    'success': True,
+                    'ip': data.get('query', ip),
+                    'country': data.get('country', 'N/A'),
+                    'country_code': data.get('countryCode', 'N/A'),
+                    'region': data.get('regionName', 'N/A'),
+                    'city': data.get('city', 'N/A'),
+                    'zip': data.get('zip', 'N/A'),
+                    'lat': data.get('lat', 0),
+                    'lon': data.get('lon', 0),
+                    'timezone': data.get('timezone', 'N/A'),
+                    'isp': data.get('isp', 'N/A'),
+                    'org': data.get('org', 'N/A'),
+                    'as': data.get('as', 'N/A')
+                }
+            else:
+                return {'success': False, 'error': data.get('message', 'Unknown error')}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def reverse_dns(ip):
+    try:
+        hostname = socket.gethostbyaddr(ip)[0]
+        return hostname
+    except:
+        return 'No PTR record'
+
+def scan_ports(ip, ports=None):
+    if ports is None:
+        common_ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 1433, 3306, 3389, 5432, 5555, 5900, 6379, 8080, 8443, 8022]
+    else:
+        common_ports = ports
+    
+    open_ports = []
+    
+    for port in common_ports:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            
+            if result == 0:
+                open_ports.append(port)
+                print(f"  {color_text('[+] Port ' + str(port) + ' - OPEN', 'green')}")
+        except:
+            pass
+    
+    return open_ports
+
+def scan_port_range(ip, start, end):
+    open_ports = []
+    
+    for port in range(start, end + 1):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            
+            if result == 0:
+                open_ports.append(port)
+                print(f"  {color_text('[+] Port ' + str(port) + ' - OPEN', 'green')}")
+        except:
+            pass
+        
+        if port % 100 == 0:
+            print(f"  {color_text('[*] Progress: ' + str(port) + '/' + str(end), 'yellow')}")
+    
+    return open_ports
+
+def ssh_connect(ip, username, password=None, key_path=None, port=22):
+    ssh_cmd = ['ssh', f"{username}@{ip}", '-p', str(port)]
+    
+    if key_path and os.path.exists(key_path):
+        ssh_cmd.extend(['-i', key_path])
+    
+    try:
+        if password:
+            ssh_cmd = ['sshpass', '-p', password] + ssh_cmd
+        
+        subprocess.run(ssh_cmd)
+        return True
+    except:
+        return False
+
+def simple_whois(domain):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect(('whois.verisign-grs.com', 43))
+        sock.send(f"{domain}\r\n".encode())
+        response = sock.recv(4096).decode()
+        sock.close()
+        
+        info = {}
+        for line in response.split('\n'):
+            if 'Registrar:' in line:
+                info['registrar'] = line.split('Registrar:')[-1].strip()
+            if 'Creation Date:' in line:
+                info['creation_date'] = line.split('Creation Date:')[-1].strip()
+            if 'Expiry Date:' in line or 'Expiration Date:' in line:
+                info['expiration_date'] = line.split(':')[-1].strip()
+        
+        return {'success': True, **info} if info else {'success': False, 'error': 'No info found'}
+    except:
+        return {'success': False, 'error': 'WHOIS lookup failed'}
+
+def simple_dns_lookup(domain):
+    results = {}
+    
+    try:
+        results['A'] = [ip for ip in socket.gethostbyname_ex(domain)[2]]
+    except:
+        results['A'] = []
+    
+    try:
+        results['MX'] = socket.getaddrinfo(domain, 25, socket.AF_INET, socket.SOCK_STREAM)
+        results['MX'] = [str(x[4][0]) for x in results['MX'][:3]]
+    except:
+        results['MX'] = []
+    
+    try:
+        results['NS'] = socket.gethostbyname_ex(domain)[1] if socket.gethostbyname_ex(domain)[1] else []
+    except:
+        results['NS'] = []
+    
+    return results
+
+def ping_host(ip):
+    try:
+        result = subprocess.run(['ping', '-c', '4', ip], capture_output=True, text=True, timeout=10)
+        return result.stdout
+    except:
+        return "Ping failed"
+
+def traceroute_host(ip):
+    try:
+        result = subprocess.run(['traceroute', '-n', ip], capture_output=True, text=True, timeout=30)
+        return result.stdout
+    except:
+        return "Traceroute failed"
+
+def get_ip_network_info(ip):
+    try:
+        network = ipaddress.ip_network(f"{ip}/24", strict=False)
+        return {
+            'network': str(network),
+            'netmask': str(network.netmask),
+            'broadcast': str(network.broadcast_address),
+            'num_hosts': network.num_addresses
+        }
+    except:
+        return None
+
+def hash_text(text):
+    hashes = {
+        'MD5': hashlib.md5(text.encode()).hexdigest(),
+        'SHA1': hashlib.sha1(text.encode()).hexdigest(),
+        'SHA256': hashlib.sha256(text.encode()).hexdigest(),
+        'SHA512': hashlib.sha512(text.encode()).hexdigest()
+    }
+    return hashes
+
+def port_service_detection(port):
+    services = {
+        21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS',
+        80: 'HTTP', 110: 'POP3', 143: 'IMAP', 443: 'HTTPS', 993: 'IMAPS',
+        995: 'POP3S', 1433: 'MSSQL', 3306: 'MySQL', 3389: 'RDP',
+        5432: 'PostgreSQL', 5555: 'ADB', 5900: 'VNC', 6379: 'Redis',
+        8080: 'HTTP-Alt', 8443: 'HTTPS-Alt', 8022: 'Termux-SSH'
+    }
+    return services.get(port, 'Unknown')
+
+def show_help():
+    print(color_text('╔══════════════════════════════════════════════════════════════════════╗', 'cyan'))
+    print(color_text('║                         UNIP COMMANDS                                ║', 'cyan'))
+    print(color_text('╚══════════════════════════════════════════════════════════════════════╝', 'cyan'))
+    print()
+    print(color_text('IP TRACKING:', 'yellow'))
+    print('  unip -track <ip>              Track any IP address to real location')
+    print('  unip -trackme                 Track your own public IP')
+    print('  unip -trackdomain <domain>    Track domain name location')
+    print()
+    print(color_text('PORT SCANNING:', 'yellow'))
+    print('  unip -scan <ip>               Scan common ports on IP')
+    print('  unip -scanrange <ip> <start> <end>   Scan port range')
+    print('  unip -p <port> <ip>           Check specific port')
+    print('  unip -fast <ip>               Quick scan (top 20 ports)')
+    print('  unip -portservice <port>      Show service name for port')
+    print()
+    print(color_text('NETWORK TOOLS:', 'yellow'))
+    print('  unip -ping <ip>               Ping IP address')
+    print('  unip -traceroute <ip>         Traceroute to IP')
+    print('  unip -dns <domain>            DNS lookup (A, MX, NS)')
+    print('  unip -whois <domain>          WHOIS lookup')
+    print('  unip -network <ip>            Show network info (CIDR, netmask)')
+    print()
+    print(color_text('SSH CONTROL:', 'yellow'))
+    print('  unip -ssh <ip> -u <user>      SSH to server')
+    print('  unip -sshphone <ip> -u <user> SSH to Termux phone')
+    print('  unip -sshs                    Start SSH server')
+    print('  unip -sshsstop                Stop SSH server')
+    print('  unip -sshstatus               Check SSH server status')
+    print('  unip -sshkeygen               Generate SSH key pair')
+    print()
+    print(color_text('ENCRYPTION TOOLS:', 'yellow'))
+    print('  unip -hash <text>             Generate hashes (MD5, SHA1, SHA256, SHA512)')
+    print()
+    print(color_text('UTILITIES:', 'yellow'))
+    print('  unip -info <ip>               All available information')
+    print('  unip -myip                    Show your public IP only')
+    print()
+    print(color_text('OUTPUT:', 'yellow'))
+    print('  unip -o <file> -command       Save output to file')
+    print()
+    print(color_text('EXAMPLES:', 'yellow'))
+    print('  unip -track 8.8.8.8')
+    print('  unip -scan 192.168.1.1')
+    print('  unip -dns google.com')
+    print('  unip -hash mypassword')
+
+def save_output(filename, content):
+    with open(filename, 'w') as f:
+        f.write(content)
+    print(color_text(f'\n[+] Output saved to: {filename}', 'green'))
+
+def main():
+    if len(sys.argv) < 2:
+        banner()
+        show_help()
+        sys.exit(0)
+    
+    output_file = None
+    args = sys.argv[1:]
+    
+    if '-o' in args:
+        o_index = args.index('-o')
+        if o_index + 1 < len(args):
+            output_file = args[o_index + 1]
+            args.pop(o_index)
+            args.pop(o_index)
+    
+    command = args[0] if args else None
+    
+    banner()
+    
+    if command in ['-h', '-help', '--help']:
+        show_help()
+        sys.exit(0)
+    
+    elif command == '-trackme':
+        print(color_text('\n[*] Getting your public IP...', 'yellow'))
+        ip = get_public_ip()
+        if ip:
+            print(color_text(f'[+] Your IP: {ip}', 'green'))
+            result = get_ip_location(ip)
+            
+            if result.get('success'):
+                output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         YOUR IP LOCATION                             ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ IP:           {result['ip']}
+    ║ Country:      {result['country']} ({result['country_code']})
+    ║ Region:       {result['region']}
+    ║ City:         {result['city']}
+    ║ ISP:          {result['isp']}
+    ║ Coordinates:  {result['lat']}, {result['lon']}
+    ║ Google Maps:  https://maps.google.com/?q={result['lat']},{result['lon']}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+                print(output)
+                if output_file:
+                    save_output(output_file, output)
+            else:
+                print(color_text(f'[-] Error: {result.get("error")}', 'red'))
+        else:
+            print(color_text('[-] Could not determine your IP', 'red'))
+    
+    elif command == '-track':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -track <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        
+        if not validate_ip(ip):
+            print(color_text('[-] Invalid IP format', 'red'))
+            sys.exit(1)
+        
+        result = get_ip_location(ip)
+        
+        if result.get('success'):
+            output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         IP LOCATION REPORT                           ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Target IP:    {result['ip']}
+    ║ Country:      {result['country']} ({result['country_code']})
+    ║ Region:       {result['region']}
+    ║ City:         {result['city']}
+    ║ ISP:          {result['isp']}
+    ║ Coordinates:  {result['lat']}, {result['lon']}
+    ║ Reverse DNS:  {reverse_dns(ip)}
+    ║ Google Maps:  https://maps.google.com/?q={result['lat']},{result['lon']}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+            print(output)
+            if output_file:
+                save_output(output_file, output)
+        else:
+            print(color_text(f'[-] Error: {result.get("error")}', 'red'))
+    
+    elif command == '-trackdomain':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -trackdomain <domain>', 'red'))
+            sys.exit(1)
+        
+        domain = args[1]
+        
+        try:
+            ip = socket.gethostbyname(domain)
+            print(color_text(f'[*] {domain} resolves to: {ip}', 'yellow'))
+            result = get_ip_location(ip)
+            
+            if result.get('success'):
+                output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                    DOMAIN LOCATION REPORT                            ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Domain:       {domain}
+    ║ IP:           {result['ip']}
+    ║ Country:      {result['country']} ({result['country_code']})
+    ║ Region:       {result['region']}
+    ║ City:         {result['city']}
+    ║ ISP:          {result['isp']}
+    ║ Coordinates:  {result['lat']}, {result['lon']}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+                print(output)
+                if output_file:
+                    save_output(output_file, output)
+            else:
+                print(color_text(f'[-] Error: {result.get("error")}', 'red'))
+        except:
+            print(color_text('[-] Could not resolve domain', 'red'))
+    
+    elif command == '-scan':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -scan <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        
+        if not validate_ip(ip):
+            print(color_text('[-] Invalid IP format', 'red'))
+            sys.exit(1)
+        
+        print(color_text(f'\n[*] Scanning common ports on: {ip}', 'yellow'))
+        print()
+        open_ports = scan_ports(ip)
+        
+        output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         PORT SCAN REPORT                             ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Target: {ip}
+    ║ Open ports found: {len(open_ports)}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+        
+        if output_file:
+            save_output(output_file, output)
+    
+    elif command == '-scanrange':
+        if len(args) < 4:
+            print(color_text('[-] Usage: unip -scanrange <ip> <start> <end>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        start = int(args[2])
+        end = int(args[3])
+        
+        if not validate_ip(ip):
+            print(color_text('[-] Invalid IP format', 'red'))
+            sys.exit(1)
+        
+        print(color_text(f'\n[*] Scanning ports {start}-{end} on: {ip}', 'yellow'))
+        print()
+        open_ports = scan_port_range(ip, start, end)
+        
+        output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         PORT SCAN REPORT                             ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Target: {ip}
+    ║ Range: {start}-{end}
+    ║ Open ports found: {len(open_ports)}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+        
+        if output_file:
+            save_output(output_file, output)
+    
+    elif command == '-p':
+        if len(args) < 3:
+            print(color_text('[-] Usage: unip -p <port> <ip>', 'red'))
+            sys.exit(1)
+        
+        port = int(args[1])
+        ip = args[2]
+        
+        if not validate_ip(ip):
+            print(color_text('[-] Invalid IP format', 'red'))
+            sys.exit(1)
+        
+        print(color_text(f'\n[*] Checking port {port} on {ip}...', 'yellow'))
+        
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            
+            service = port_service_detection(port)
+            
+            if result == 0:
+                print(color_text(f'[+] Port {port} ({service}) is OPEN on {ip}', 'green'))
+            else:
+                print(color_text(f'[-] Port {port} ({service}) is CLOSED on {ip}', 'red'))
+        except:
+            print(color_text('[-] Could not check port', 'red'))
+    
+    elif command == '-fast':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -fast <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        top_ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995, 1433, 1723, 3306, 3389, 5432, 5900, 8080, 8443]
+        
+        if not validate_ip(ip):
+            print(color_text('[-] Invalid IP format', 'red'))
+            sys.exit(1)
+        
+        print(color_text(f'\n[*] Fast scanning {ip} (top 20 ports)', 'yellow'))
+        print()
+        open_ports = scan_ports(ip, top_ports)
+        
+        if not open_ports:
+            print(f"  {color_text('[-] No open ports found', 'red')}")
+    
+    elif command == '-portservice':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -portservice <port>', 'red'))
+            sys.exit(1)
+        
+        port = int(args[1])
+        service = port_service_detection(port)
+        print(color_text(f'\n[+] Port {port}: {service}', 'green'))
+    
+    elif command == '-ping':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -ping <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        print(color_text(f'\n[*] Pinging {ip}...', 'yellow'))
+        print()
+        result = ping_host(ip)
+        print(result)
+    
+    elif command == '-traceroute':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -traceroute <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        print(color_text(f'\n[*] Traceroute to {ip}...', 'yellow'))
+        print()
+        result = traceroute_host(ip)
+        print(result)
+    
+    elif command == '-dns':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -dns <domain>', 'red'))
+            sys.exit(1)
+        
+        domain = args[1]
+        print(color_text(f'\n[*] DNS lookup for {domain}...', 'yellow'))
+        print()
+        results = simple_dns_lookup(domain)
+        
+        output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         DNS LOOKUP REPORT                            ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Domain: {domain}
+    """
+        
+        if results.get('A'):
+            output += f"║ A Records: {', '.join(results['A'][:3])}\n"
+        if results.get('MX'):
+            output += f"║ MX Records: {', '.join(results['MX'][:3])}\n"
+        if results.get('NS'):
+            output += f"║ NS Records: {', '.join(results['NS'][:3])}\n"
+        
+        output += "╚══════════════════════════════════════════════════════════════════════╝"
+        print(output)
+        
+        if output_file:
+            save_output(output_file, output)
+    
+    elif command == '-whois':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -whois <domain>', 'red'))
+            sys.exit(1)
+        
+        domain = args[1]
+        print(color_text(f'\n[*] WHOIS lookup for {domain}...', 'yellow'))
+        print()
+        result = simple_whois(domain)
+        
+        if result.get('success'):
+            output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         WHOIS REPORT                                 ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Domain: {domain}
+    ║ Registrar: {result.get('registrar', 'N/A')}
+    ║ Creation Date: {result.get('creation_date', 'N/A')}
+    ║ Expiration Date: {result.get('expiration_date', 'N/A')}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+            print(output)
+            if output_file:
+                save_output(output_file, output)
+        else:
+            print(color_text(f'[-] {result.get("error")}', 'red'))
+    
+    elif command == '-network':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -network <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        result = get_ip_network_info(ip)
+        
+        if result:
+            output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         NETWORK INFO                                 ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ IP: {ip}
+    ║ Network: {result['network']}
+    ║ Netmask: {result['netmask']}
+    ║ Broadcast: {result['broadcast']}
+    ║ Total Hosts: {result['num_hosts']}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+            print(output)
+            if output_file:
+                save_output(output_file, output)
+        else:
+            print(color_text('[-] Could not calculate network info', 'red'))
+    
+    elif command == '-hash':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -hash <text>', 'red'))
+            sys.exit(1)
+        
+        text = ' '.join(args[1:])
+        hashes = hash_text(text)
+        
+        output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                         HASH GENERATOR                               ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ Input: {text[:50]}
+    ║ MD5: {hashes['MD5']}
+    ║ SHA1: {hashes['SHA1']}
+    ║ SHA256: {hashes['SHA256']}
+    ║ SHA512: {hashes['SHA512']}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+        print(output)
+        if output_file:
+            save_output(output_file, output)
+    
+    elif command == '-info':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -info <ip>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        
+        print(color_text(f'\n[*] Gathering all information for {ip}', 'yellow'))
+        print()
+        
+        location = get_ip_location(ip)
+        ports = scan_ports(ip)
+        rdns = reverse_dns(ip)
+        network = get_ip_network_info(ip)
+        
+        output = f"""
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║                    COMPLETE IP INFORMATION                           ║
+    ╠══════════════════════════════════════════════════════════════════════╣
+    ║ IP: {ip}
+    ║ Location: {location.get('city', 'N/A')}, {location.get('region', 'N/A')}, {location.get('country', 'N/A')}
+    ║ Coordinates: {location.get('lat', 0)}, {location.get('lon', 0)}
+    ║ ISP: {location.get('isp', 'N/A')}
+    ║ Reverse DNS: {rdns}
+    ║ Network: {network['network'] if network else 'N/A'}
+    ║ Open Ports: {', '.join(map(str, ports)) if ports else 'None found'}
+    ╚══════════════════════════════════════════════════════════════════════╝
+    """
+        print(output)
+        
+        if output_file:
+            save_output(output_file, output)
+    
+    elif command == '-myip':
+        ip = get_public_ip()
+        if ip:
+            print(color_text(f'\n[+] Your public IP: {ip}', 'green'))
+        else:
+            print(color_text('\n[-] Could not determine your IP', 'red'))
+    
+    elif command == '-ssh':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -ssh <ip> -u <username>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        username = None
+        port = 22
+        
+        if '-u' in args:
+            u_index = args.index('-u')
+            if u_index + 1 < len(args):
+                username = args[u_index + 1]
+        
+        if '-p' in args:
+            p_index = args.index('-p')
+            if p_index + 1 < len(args):
+                port = int(args[p_index + 1])
+        
+        if not username:
+            username = input(color_text('[?] Username: ', 'yellow'))
+        
+        password = getpass.getpass(color_text('[?] Password: ', 'yellow'))
+        ssh_connect(ip, username, password=password, port=port)
+    
+    elif command == '-sshphone':
+        if len(args) < 2:
+            print(color_text('[-] Usage: unip -sshphone <ip> -u <username>', 'red'))
+            sys.exit(1)
+        
+        ip = args[1]
+        username = None
+        
+        if '-u' in args:
+            u_index = args.index('-u')
+            if u_index + 1 < len(args):
+                username = args[u_index + 1]
+        
+        if not username:
+            username = input(color_text('[?] Termux username: ', 'yellow'))
+        
+        print(color_text('\n[*] Connecting to your phone via SSH (port 8022)', 'yellow'))
+        ssh_connect(ip, username, port=8022)
+    
+    elif command == '-sshs':
+        print(color_text('\n[*] Starting SSH server...', 'yellow'))
+        subprocess.run(['sudo', 'systemctl', 'start', 'ssh'])
+        print(color_text('[+] SSH server started', 'green'))
+    
+    elif command == '-sshsstop':
+        print(color_text('\n[*] Stopping SSH server...', 'yellow'))
+        subprocess.run(['sudo', 'systemctl', 'stop', 'ssh'])
+        print(color_text('[+] SSH server stopped', 'green'))
+    
+    elif command == '-sshstatus':
+        result = subprocess.run(['systemctl', 'is-active', 'ssh'], capture_output=True, text=True)
+        if result.stdout.strip() == 'active':
+            print(color_text('\n[+] SSH server is RUNNING', 'green'))
+        else:
+            print(color_text('\n[-] SSH server is STOPPED', 'red'))
+    
+    elif command == '-sshkeygen':
+        print(color_text('\n[*] Generating SSH key pair...', 'yellow'))
+        key_path = os.path.expanduser("~/.ssh/id_rsa")
+        subprocess.run(['ssh-keygen', '-t', 'rsa', '-b', '4096', '-f', key_path])
+        print(color_text(f'[+] Key generated: {key_path}', 'green'))
+    
+    else:
+        print(color_text(f'\n[-] Unknown command: {command}', 'red'))
+        print(color_text('[*] Type unip -h for help', 'yellow'))
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(color_text('\n\n[*] Interrupted', 'yellow'))
+        sys.exit(0)
+    except Exception as e:
+        print(color_text(f'\n[-] Error: {e}', 'red'))
+        sys.exit(1)
