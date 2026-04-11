@@ -14,8 +14,6 @@ A powerful command-line tool for IP tracking, port scanning, network analysis, a
 
 ## Installation
 
-bash```
-
 sudo wget -O /usr/local/bin/unip https://raw.githubusercontent.com/CSG-c/unip/main/unip
 sudo chmod +x /usr/local/bin/unip
 unip -h
